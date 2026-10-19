@@ -28,10 +28,14 @@ type produceFunc func(rec *kgo.Record, done func(*kgo.Record, error))
 
 // Run keeps one engine feed stream open and copies its events to Kafka until
 // ctx is done or a fatal error is reported.
-func Run(ctx context.Context, feed pb.EngineFeedClient, cl *kgo.Client, prog *Progress,
+//
+// produceCtx is NOT ctx: franz-go fails every buffered record whose context is
+// cancelled, so tying records to ctx would fail them on Ctrl-C (or on a stream
+// reconnect, for a stream ctx). main cancels produceCtx only after the flush
+// deadline on shutdown.
+func Run(ctx, produceCtx context.Context, feed pb.EngineFeedClient, cl *kgo.Client, prog *Progress,
 	gatewayID string, fatal func(error)) {
-	// Root ctx, not the stream ctx: reconnecting must not cancel records waiting in the Kafka buffer.
-	produce := func(rec *kgo.Record, done func(*kgo.Record, error)) { cl.Produce(ctx, rec, done) }
+	produce := func(rec *kgo.Record, done func(*kgo.Record, error)) { cl.Produce(produceCtx, rec, done) }
 
 	backoff := 200 * time.Millisecond
 	for ctx.Err() == nil {
