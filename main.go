@@ -89,15 +89,32 @@ func run() int {
 		statsLoop(ctx)
 	}()
 
+	// Records live on produceCtx, not ctx: a signal must not fail records still
+	// waiting in the Kafka buffer. produceCtx is cancelled only if shutdown takes
+	// longer than shutdownGrace (e.g. Kafka is down and Produce is blocked on a
+	// full buffer); those records were never acked, so they are re-sent next run.
+	const shutdownGrace = 10 * time.Second
+	produceCtx, produceCancel := context.WithCancel(context.Background())
+	defer produceCancel()
+	go func() {
+		<-ctx.Done()
+		t := time.NewTimer(shutdownGrace)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			produceCancel()
+		case <-produceCtx.Done():
+		}
+	}()
+
 	slog.Info("bridge started", "engine_feed", cfg.EngineFeed, "topic", cfg.Topic, "symbols", len(symbols))
-	Run(ctx, feed, cl, prog, cfg.GatewayID, fatal)
+	Run(ctx, produceCtx, feed, cl, prog, cfg.GatewayID, fatal)
 	bg.Wait()
 
-	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := cl.Flush(flushCtx); err != nil {
+	if err := cl.Flush(produceCtx); err != nil {
 		slog.Warn("flush did not finish", "err", err)
 	}
-	cancel()
+	produceCancel()
 	if err := SaveCheckpoint(cfg.CheckpointPath, prog.AckedCopy()); err != nil {
 		slog.Error("final checkpoint save failed", "err", err)
 	}
